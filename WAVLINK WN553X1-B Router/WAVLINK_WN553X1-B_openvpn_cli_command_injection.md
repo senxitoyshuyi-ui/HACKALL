@@ -17,9 +17,9 @@ Successful exploitation requires a valid session token (obtainable via the `opt=
 
 The vulnerability resides in the `sub_416568` function of `/bin/ioos` (the `.csp` back-end on 127.0.0.1:81, behind lighttpd). The user-controlled `file_id` parameter is passed to `snprintf` without proper input validation (only a space check via `strchr`), and the resulting string is forwarded to `popen`:
 
-![image-202608081712093](./images/05.png)
+![image-202608081712093](../images/05.png)
 
-![image-202608081712](./images/06.png)
+![image-202608081712](../images/06.png)
 
 
 
